@@ -15,7 +15,7 @@ st.set_page_config(
 # 1. API 주소(Web App URL) 설정 및 연결 체크
 # -----------------------------------------------------------------------------
 # Streamlit secrets 또는 세션 스테이트에서 URL 가져오기
-WEB_APP_URL = st.secrets.get("https://script.google.com/macros/s/AKfycbx1EbVcrhIoxOLM9468YQ7XpY1u7zTLIAsNqLBd4mHaNwKXQxBbiEYzXXj8xR48wGO-/exec", "")
+WEB_APP_URL = st.secrets.get("https://script.google.com/macros/s/AKfycbwg_4xolo3_0UVh3D6-saF_Rh77stpksrgji2fcxMKEciNEGsNhgRR3efPPLtDlNqro/exec", "")
 
 # 세션 스테이트를 통한 실시간 URL 입력 지원 (설정 편의성 제공)
 if "temp_url" not in st.session_state:
