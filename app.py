@@ -217,7 +217,7 @@ with tab_dashboard:
         with kpi_col1:
             st.metric(
                 label="누적 사용 총액", 
-                value=f"{total_spent:,.0)원", 
+                value=f"{total_spent:,.0f}원", 
                 delta=f"한도 {new_limit:,.0f}원 대비"
             )
             # 진행 바 시각화
