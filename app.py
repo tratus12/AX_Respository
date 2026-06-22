@@ -1,8 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import gspread
-from google.oauth2.service_account import Credentials
+import requests
 import datetime
 
 # 페이지 기본 설정
@@ -13,108 +12,127 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# 1. 구글 스프레드시트 연결 설정 (Google Sheets API Connection)
+# 1. API 주소(Web App URL) 설정 및 연결 체크
 # -----------------------------------------------------------------------------
-@st.cache_resource
-def get_gspread_client():
-    """Streamlit Secrets에 저장된 구글 서비스 계정 정보를 활용해 gspread 클라이언트를 인증합니다."""
+# Streamlit secrets 또는 세션 스테이트에서 URL 가져오기
+WEB_APP_URL = st.secrets.get("https://script.google.com/macros/s/AKfycbx1EbVcrhIoxOLM9468YQ7XpY1u7zTLIAsNqLBd4mHaNwKXQxBbiEYzXXj8xR48wGO-/exec", "")
+
+# 세션 스테이트를 통한 실시간 URL 입력 지원 (설정 편의성 제공)
+if "temp_url" not in st.session_state:
+    st.session_state["temp_url"] = WEB_APP_URL
+
+# -----------------------------------------------------------------------------
+# 2. 데이터 통신 헬퍼 함수 정의 (API Requests)
+# -----------------------------------------------------------------------------
+@st.cache_data(ttl=5) # 5초간 캐싱하여 빠른 화면 전환 제공, 실시간성 유지
+def fetch_all_data(url):
+    """구글 앱스 스크립트 웹 앱에서 전체 예산 내역과 예산 한도를 가져옵니다."""
+    if not url:
+        return None
     try:
-        # 배포 환경 (Streamlit Secrets 사용)
-        creds_info = st.secrets["gcp_service_account"]
-        scope = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        credentials = Credentials.from_service_account_info(creds_info, scopes=scope)
-        return gspread.authorize(credentials)
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"⚠️ API 호출 실패 (HTTP {response.status_code})")
     except Exception as e:
-        # 로컬 개발 환경용 예외 처리 안내
-        st.error("구글 서비스 계정 자격 증명(Secrets)을 찾을 수 없거나 올바르지 않습니다. 'README.md' 파일을 참고하여 설정을 완료해 주세요.")
-        st.stop()
+        st.error(f"⚠️ 연결 실패: {str(e)}")
+    return None
 
-def get_google_sheet():
-    """구글 시트를 열고 필요한 워크시트가 없으면 생성하여 반환합니다."""
-    client = get_gspread_client()
+def send_api_post(url, payload):
+    """구글 앱스 스크립트 웹 앱으로 데이터를 전송(추가/삭제/설정 변경)합니다."""
+    if not url:
+        return False
     try:
-        # 시트 이름은 임의로 'Team_Budget_DB'로 지정 (Secrets에서 동적으로 가져올 수도 있음)
-        sheet_name = st.secrets.get("spreadsheet_name", "Team_Budget_DB")
-        spreadsheet = client.open(sheet_name)
-    except gspread.SpreadsheetNotFound:
-        st.error(f"구글 드라이브에서 '{sheet_name}' 이름의 스프레드시트를 찾을 수 없습니다. 서비스 계정 이메일에 공유를 완료했는지 확인해 주세요.")
-        st.stop()
-        
-    # 'data' 워크시트 가져오기 또는 생성하기
-    try:
-        worksheet = spreadsheet.worksheet("data")
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title="data", rows="100", cols="20")
-        # 헤더 삽입
-        worksheet.append_row(["ID", "Month", "Member", "Category", "Amount"])
-        
-    # 'config' 워크시트(목표 예산 등 설정 저장용) 가져오기 또는 생성하기
-    try:
-        config_sheet = spreadsheet.worksheet("config")
-    except gspread.WorksheetNotFound:
-        config_sheet = spreadsheet.add_worksheet(title="config", rows="10", cols="5")
-        config_sheet.append_row(["Key", "Value"])
-        config_sheet.append_row(["budget_limit", "10000000"]) # 기본값 1천만 원
-        
-    return worksheet, config_sheet
-
-# 구글 시트 객체 초기 로드
-worksheet, config_sheet = get_google_sheet()
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            res_json = response.json()
+            return res_json.get("status") == "success"
+    except Exception as e:
+        st.error(f"⚠️ 요청 전송 실패: {str(e)}")
+    return False
 
 # -----------------------------------------------------------------------------
-# 2. 데이터 헬퍼 함수 정의
+# 3. UI 및 연결 상태 가이드 구성
 # -----------------------------------------------------------------------------
-def load_data():
-    """스프레드시트에서 예산 내역 데이터를 판다스 DataFrame으로 가져옵니다."""
-    records = worksheet.get_all_records()
-    if not records:
-        return pd.DataFrame(columns=["ID", "Month", "Member", "Category", "Amount"])
-    df = pd.DataFrame(records)
-    # 데이터 타입 정렬
+active_url = st.session_state["temp_url"]
+
+if not active_url:
+    st.title("📊 팀 예산 관리 시스템")
+    st.warning("🔌 구글 앱스 스크립트 Web App URL 설정이 필요합니다!")
+    
+    st.markdown("""
+    ### ⚙️ 대시보드를 구글 스프레드시트와 동기화하는 초간단 3단계:
+    
+    1. **앱스 스크립트 배포하기**
+       * 구글 스프레드시트(`확장 프로그램 > Apps Script`)에 제공된 `README.md` 내 배포용 코드를 붙여넣습니다.
+       * 우측 상단 **[배포 > 새 배포]**를 누른 뒤, 유형을 **'웹 앱'**으로 선택합니다.
+       * **액세스 권한이 있는 사용자**를 반드시 **'모든 사용자(Anyone)'**로 설정 후 배포합니다.
+    
+    2. **URL 복사 및 입력**
+       * 생성된 `웹 앱 URL`(https://script.google.com/macros/s/.../exec)을 아래 칸에 입력해 주세요.
+    """)
+    
+    # 실시간 URL 입력을 위한 폼
+    input_url = st.text_input("🔗 복사한 Web App URL을 여기에 붙여넣으세요:", value="")
+    if st.button("연결 테스트 및 저장"):
+        if input_url.startswith("https://script.google.com/"):
+            st.session_state["temp_url"] = input_url
+            st.success("🎉 URL이 임시 등록되었습니다! 페이지를 다시 로드합니다.")
+            st.rerun()
+        else:
+            st.error("올바른 구글 웹 앱 주소 형식이 아닙니다.")
+            
+    st.markdown("""
+    ---
+    💡 **영구 적용하기:** 배포한 뒤 스트림릿 클라우드 대시보드의 **Settings > Secrets**에 아래 한 줄만 입력하면 접속할 때마다 자동으로 연결됩니다.
+    ```toml
+    web_app_url = "여러분의_웹앱_실제_주소"
+    ```
+    """)
+    st.stop()
+
+# API 통신 시도 및 데이터 로드
+api_response = fetch_all_data(active_url)
+
+if api_response is None:
+    st.title("📊 팀 예산 관리 시스템")
+    st.error("❌ 구글 앱스 스크립트가 올바른 JSON 데이터를 반환하지 않았습니다.")
+    st.info("💡 스프레드시트의 Apps Script가 올바르게 배포되었는지, 그리고 URL의 액세스 권한이 '모든 사용자(Anyone)'로 되어 있는지 확인해 주세요.")
+    if st.button("🔗 다른 URL 입력하기"):
+        st.session_state["temp_url"] = ""
+        st.rerun()
+    st.stop()
+
+# 정상 로드 시 변수 파싱
+raw_data = api_response.get("data", [])
+budget_limit = api_response.get("budget_limit", 10000000)
+
+# DataFrame 구축 및 타입 정리
+if raw_data:
+    df = pd.DataFrame(raw_data)
     df["Amount"] = pd.to_numeric(df["Amount"], errors='coerce').fillna(0).astype(int)
-    return df
+else:
+    df = pd.DataFrame(columns=["ID", "Month", "Member", "Category", "Amount"])
 
-def load_budget_limit():
-    """스프레드시트 config 워크시트에서 목표 예산 설정을 읽어옵니다."""
-    try:
-        records = config_sheet.get_all_records()
-        for r in records:
-            if r["Key"] == "budget_limit":
-                return int(r["Value"])
-    except:
-        pass
-    return 10000000
-
-def update_budget_limit_in_sheet(limit_val):
-    """목표 예산 설정 값을 스프레드시트에 저장합니다."""
-    try:
-        cell = config_sheet.find("budget_limit")
-        config_sheet.update_cell(cell.row, cell.col + 1, str(limit_val))
-    except gspread.CellNotFound:
-        config_sheet.append_row(["budget_limit", str(limit_val)])
-
-# -----------------------------------------------------------------------------
-# 3. UI 구성 요소 구현
-# -----------------------------------------------------------------------------
-st.title("📊 팀 예산 관리 시스템 (Google Sheets 연동)")
-st.caption("부장님 보고용 월별 예산 실시간 취합 및 분석 대시보드")
+# --- 정상 연결 시 대시보드 메인 화면 로드 ---
+st.title("📊 팀 예산 관리 시스템 (Google Sheets API 연동)")
+st.caption("구글 웹 앱 URL 기반 실시간 동기화 대시보드")
 
 # 사이드바 설정 영역
 st.sidebar.header("🎯 목표 예산 설정")
-current_limit = load_budget_limit()
 new_limit = st.sidebar.number_input(
     "이달의 목표 예산 한도 (원)",
-    value=current_limit,
+    value=budget_limit,
     step=500000,
     format="%d"
 )
-if new_limit != current_limit:
-    update_budget_limit_in_sheet(new_limit)
-    st.sidebar.success("🎯 목표 예산이 실시간 업데이트되었습니다!")
-    st.rerun()
+if new_limit != budget_limit:
+    payload = {"action": "update_limit", "value": int(new_limit)}
+    if send_api_post(active_url, payload):
+        st.sidebar.success("🎯 목표 예산이 실시간 업데이트되었습니다!")
+        st.cache_data.clear() # 캐시 클리어 후 리로드
+        st.rerun()
 
 # 탭 구조 정의
 tab_input, tab_dashboard = st.tabs(["📝 데이터 입력 및 관리", "📈 실시간 대시보드"])
@@ -139,15 +157,24 @@ with tab_input:
                 if amount <= 0:
                     st.warning("사용 금액은 0원보다 커야 합니다.")
                 else:
-                    # 구글 시트에 행 추가
                     new_id = str(int(datetime.datetime.now().timestamp() * 1000))
-                    worksheet.append_row([new_id, month_str, member, category, amount])
-                    st.success(f"데이터가 구글 시트에 안전하게 기록되었습니다! (연월: {month_str})")
-                    st.rerun()
+                    payload = {
+                        "action": "add",
+                        "id": new_id,
+                        "month": month_str,
+                        "member": member,
+                        "category": category,
+                        "amount": int(amount)
+                    }
+                    if send_api_post(active_url, payload):
+                        st.success(f"데이터가 구글 시트에 안전하게 기록되었습니다! (연월: {month_str})")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("스프레드시트에 데이터를 쓰는 데 실패했습니다.")
 
     with col_list:
         st.subheader("📂 입력 내역 관리")
-        df = load_data()
         
         if df.empty:
             st.info("현재 입력된 예산 내역이 없습니다. 왼쪽 양식에서 추가해 주세요.")
@@ -193,24 +220,24 @@ with tab_input:
                 
                 if st.button("선택한 항목 삭제", type="primary"):
                     target_id = delete_options[selected_to_delete]
-                    try:
-                        # 시트에서 ID 셀 검색하여 해당 행 삭제
-                        cell = worksheet.find(str(target_id))
-                        worksheet.delete_rows(cell.row)
+                    payload = {
+                        "action": "delete",
+                        "id": target_id
+                    }
+                    if send_api_post(active_url, payload):
                         st.success("데이터가 구글 시트에서 즉시 삭제되었습니다.")
+                        st.cache_data.clear()
                         st.rerun()
-                    except Exception as e:
-                        st.error("데이터 삭제 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+                    else:
+                        st.error("데이터 삭제 처리에 실패했습니다.")
 
 # --- TAB 2: 실시간 대시보드 ---
 with tab_dashboard:
-    df = load_data()
-    
     if df.empty:
         st.info("분석할 예산 데이터가 부족합니다. 먼저 '데이터 입력' 탭에서 데이터를 입력해 주세요.")
     else:
         total_spent = df["Amount"].sum()
-        execution_rate = (total_spent / new_limit) * 100
+        execution_rate = (total_spent / budget_limit) * 100
         
         # 1. 상단 KPI 카드 블록
         kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
@@ -218,15 +245,13 @@ with tab_dashboard:
             st.metric(
                 label="누적 사용 총액", 
                 value=f"{total_spent:,.0f}원", 
-                delta=f"한도 {new_limit:,.0f}원 대비"
+                delta=f"한도 {budget_limit:,.0f}원 대비"
             )
-            # 진행 바 시각화
             progress_val = min(int(execution_rate), 100)
             st.progress(progress_val / 100)
             st.caption(f"목표 대비 예산 집행률: **{execution_rate:.1f}%**")
             
         with kpi_col2:
-            # 가장 지출이 많은 항목 계산
             cat_totals = df.groupby("Category")["Amount"].sum()
             if not cat_totals.empty:
                 top_cat = cat_totals.idxmax()
@@ -236,7 +261,7 @@ with tab_dashboard:
                 st.metric(label="최다 지출 항목", value="-")
                 
         with kpi_col3:
-            st.metric(label="등록 데이터 건수", value=f"{len(df)} 건", delta="구글 시트 연동 활성화")
+            st.metric(label="등록 데이터 건수", value=f"{len(df)} 건", delta="Google Web App 연동 활성화")
 
         st.markdown("---")
 
@@ -274,7 +299,6 @@ with tab_dashboard:
         # 3. 월별/항목별 요약 피벗 테이블 (취합본)
         st.subheader("📅 월별/항목별 요약 취합 테이블")
         try:
-            # 피벗 테이블 생성
             pivot_df = df.pivot_table(
                 index="Month",
                 columns="Category",
@@ -282,7 +306,6 @@ with tab_dashboard:
                 aggfunc="sum",
                 fill_value=0
             )
-            # 행별 총합 추가
             pivot_df["합계"] = pivot_df.sum(axis=1)
             pivot_df = pivot_df.sort_index(ascending=False)
             
