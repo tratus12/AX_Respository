@@ -6,7 +6,7 @@ import datetime
 
 # 페이지 기본 설정
 st.set_page_config(
-    page_title="팀 예산 관리 대시보드",
+    page_title="팀 예산 관리 대시보드 Pro",
     page_icon="📊",
     layout="wide"
 )
@@ -112,12 +112,18 @@ budget_limit = api_response.get("budget_limit", 10000000)
 if raw_data:
     df = pd.DataFrame(raw_data)
     df["Amount"] = pd.to_numeric(df["Amount"], errors='coerce').fillna(0).astype(int)
+    
+    # 신규 기능: 스프레드시트 컬럼에 비고(Description) 데이터가 누락된 경우를 위한 방어 코드
+    if "Description" not in df.columns:
+        df["Description"] = ""
+    else:
+        df["Description"] = df["Description"].fillna("")
 else:
-    df = pd.DataFrame(columns=["ID", "Month", "Member", "Category", "Amount"])
+    df = pd.DataFrame(columns=["ID", "Month", "Member", "Category", "Amount", "Description"])
 
 # --- 정상 연결 시 대시보드 메인 화면 로드 ---
-st.title("📊 팀 예산 관리 시스템 (Google Sheets API 연동)")
-st.caption("구글 웹 앱 URL 기반 실시간 동기화 대시보드")
+st.title("📊 팀 예산 관리 시스템 Pro (Google Sheets)")
+st.caption("실시간 클라우드 동기화 및 상세 내역 추적 지원 대시보드")
 
 # 사이드바 설정 영역
 st.sidebar.header("🎯 목표 예산 설정")
@@ -148,8 +154,11 @@ with tab_input:
             month_date = st.date_input("해당 월 선택", datetime.date.today())
             month_str = month_date.strftime("%Y-%m")
             
-            category = st.selectbox("예산 항목", ["수선유지비", "비품", "개량공사"])
+            category = st.selectbox("예산 항목", ["수선유지비", "비품", "개량공사", "소모품비", "회의비", "기타"])
             amount = st.number_input("사용 금액 (원)", min_value=0, step=1000, format="%d")
+            
+            # [신규 추가] 상세 내역(비고/적요) 기입 필드
+            description = st.text_input("상세 사용 내역 (비고)", placeholder="예: 소모성 마우스 5개 구입, 지붕 보수 등")
             
             submit_btn = st.form_submit_button("기록 저장하기")
             
@@ -164,7 +173,8 @@ with tab_input:
                         "month": month_str,
                         "member": member,
                         "category": category,
-                        "amount": int(amount)
+                        "amount": int(amount),
+                        "description": description # 신규 필드 데이터 전송
                     }
                     if send_api_post(active_url, payload):
                         st.success(f"데이터가 구글 시트에 안전하게 기록되었습니다! (연월: {month_str})")
@@ -180,7 +190,7 @@ with tab_input:
             st.info("현재 입력된 예산 내역이 없습니다. 왼쪽 양식에서 추가해 주세요.")
         else:
             # 실시간 필터 적용
-            st.write("🔍 데이터 필터링")
+            st.write("🔍 데이터 필터링 및 다운로드")
             f_col1, f_col2, f_col3 = st.columns(3)
             with f_col1:
                 all_months = ["전체"] + sorted(df["Month"].unique().tolist(), reverse=True)
@@ -201,11 +211,25 @@ with tab_input:
             if sel_cat != "전체":
                 filtered_df = filtered_df[filtered_df["Category"] == sel_cat]
                 
-            # 데이터 그리드 렌더링
+            # 데이터 그리드 렌더링 (비고 컬럼 순서 조정 및 노출)
+            display_cols = ["Month", "Member", "Category", "Amount", "Description"]
+            # 실존하는 열만 필터링하여 출력 오류 방지
+            active_cols = [c for c in display_cols if c in filtered_df.columns]
+            
             st.dataframe(
-                filtered_df.style.format({"Amount": "{:,.0f}원"}),
+                filtered_df[active_cols].style.format({"Amount": "{:,.0f}원"}),
                 use_container_width=True,
                 hide_index=True
+            )
+            
+            # [신규 기능] 필터링된 결과 데이터 CSV 내보내기 버튼 추가
+            csv_data = filtered_df[active_cols].to_csv(index=False, encoding="utf-8-sig")
+            st.download_button(
+                label="📥 현재 필터링된 결과 내보내기 (Excel/CSV)",
+                data=csv_data,
+                file_name=f"team_budget_{datetime.datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                key="download_csv"
             )
             
             # 행 개별 삭제 기능 구현
@@ -213,7 +237,7 @@ with tab_input:
             st.subheader("🗑️ 개별 내역 삭제")
             if not filtered_df.empty:
                 delete_options = {
-                    f"[{row['Month']}] {row['Member']} - {row['Category']} ({row['Amount']:,}원)": row['ID']
+                    f"[{row['Month']}] {row['Member']} - {row['Category']} ({row['Amount']:,}원) - {row.get('Description', '')}": row['ID']
                     for idx, row in filtered_df.iterrows()
                 }
                 selected_to_delete = st.selectbox("삭제할 항목을 선택하세요", list(delete_options.keys()))
@@ -238,6 +262,15 @@ with tab_dashboard:
     else:
         total_spent = df["Amount"].sum()
         execution_rate = (total_spent / budget_limit) * 100
+        remaining_budget = budget_limit - total_spent
+        
+        # [신규 추가] 예산 한도 상태 경고 및 진단 로직 (Smart Alert)
+        if execution_rate > 100:
+            st.error(f"🚨 **주의: 예산 한도를 초과했습니다!** 현재 한도 대비 {-remaining_budget:,.0f}원 초과 지출 중입니다.")
+        elif execution_rate >= 85:
+            st.warning(f"⚠️ **위험 경보: 예산 소진 임박!** 현재 집행률이 {execution_rate:.1f}%에 도달하였습니다. 남은 예산: {remaining_budget:,.0f}원")
+        else:
+            st.success(f"✅ **안전 상태:** 안정적인 예산 상황입니다. 남은 사용 가능 금액: {remaining_budget:,.0f}원")
         
         # 1. 상단 KPI 카드 블록
         kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
@@ -245,7 +278,7 @@ with tab_dashboard:
             st.metric(
                 label="누적 사용 총액", 
                 value=f"{total_spent:,.0f}원", 
-                delta=f"한도 {budget_limit:,.0f}원 대비"
+                delta=f"남은 잔여 예산: {remaining_budget:,.0f}원"
             )
             progress_val = min(int(execution_rate), 100)
             st.progress(progress_val / 100)
@@ -261,15 +294,54 @@ with tab_dashboard:
                 st.metric(label="최다 지출 항목", value="-")
                 
         with kpi_col3:
-            st.metric(label="등록 데이터 건수", value=f"{len(df)} 건", delta="Google Web App 연동 활성화")
+            # [신규 추가] 건당 평균 지출액 분석 카드
+            avg_amount = df["Amount"].mean()
+            st.metric(
+                label="건당 평균 사용액", 
+                value=f"{avg_amount:,.0f}원", 
+                delta=f"최대 지출: {df['Amount'].max():,.0f}원"
+            )
 
         st.markdown("---")
 
-        # 2. 시각화 차트 영역
+        # 2. [신규 추가] 월별 지출 트렌드 라인 차트 영역
+        st.subheader("📅 월별 총 지출액 추이 분석")
+        monthly_trend = df.groupby("Month")["Amount"].sum().reset_index().sort_values("Month")
+        
+        fig_trend = px.line(
+            monthly_trend,
+            x="Month",
+            y="Amount",
+            markers=True,
+            text="Amount",
+            labels={"Amount": "총 사용액(원)", "Month": "기준월"},
+            title="연간 지출 증감 트렌드 (설정 예산 한도 대비 흐름)",
+            color_discrete_sequence=["#2563eb"]
+        )
+        fig_trend.update_traces(textposition="top center", texttemplate="%{y:,.0f}원")
+        
+        # 예산 한도 기준선 추가 (레드 가이드라인)
+        fig_trend.add_hline(
+            y=budget_limit, 
+            line_dash="dash", 
+            line_color="#ef4444", 
+            annotation_text=f"목표 예산 한도 ({budget_limit:,.0f}원)", 
+            annotation_position="top left"
+        )
+        fig_trend.update_layout(
+            yaxis_gridcolor='rgba(200, 200, 200, 0.2)',
+            margin=dict(t=50, b=20, l=20, r=20),
+            height=350
+        )
+        st.plotly_chart(fig_trend, use_container_width=True)
+
+        st.markdown("---")
+
+        # 3. 시각화 차트 영역 (좌/우 분할 레이아웃)
         chart_col1, chart_col2 = st.columns(2)
         
         with chart_col1:
-            st.subheader("🏠 항목별 예산 분포")
+            st.subheader("🏠 항목별 예산 분포 비율")
             fig_pie = px.pie(
                 df, 
                 values="Amount", 
@@ -281,7 +353,7 @@ with tab_dashboard:
             st.plotly_chart(fig_pie, use_container_width=True)
             
         with chart_col2:
-            st.subheader("👥 팀원별 누적 사용액")
+            st.subheader("👥 팀원별 누적 사용액 비교")
             member_totals = df.groupby("Member")["Amount"].sum().reset_index()
             fig_bar = px.bar(
                 member_totals,
@@ -296,8 +368,8 @@ with tab_dashboard:
 
         st.markdown("---")
 
-        # 3. 월별/항목별 요약 피벗 테이블 (취합본)
-        st.subheader("📅 월별/항목별 요약 취합 테이블")
+        # 4. 월별/항목별 요약 피вут 테이블 (취합본)
+        st.subheader("📊 월별 / 항목별 요약 취합 매트릭스")
         try:
             pivot_df = df.pivot_table(
                 index="Month",
